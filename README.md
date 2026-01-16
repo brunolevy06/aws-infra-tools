@@ -1,6 +1,6 @@
-# AWS Network Tools
+# AWS Infra Tools
 
-A collection of Python-based CLI tools for auditing and managing AWS network infrastructure.
+A collection of Python-based CLI tools for auditing and managing AWS infrastructure.
 
 ## Purpose
 
@@ -13,7 +13,7 @@ These tools help DevOps engineers and Cloud Architects:
 
 ### 1. VPC Inventory Tool (`vpc_inventory.py`)
 
-Comprehensive network inventory tool that lists all VPCs and their associated resources in a region.
+A comprehensive network inventory tool that lists all VPCs and their associated resources in a region.
 
 **Features:**
 - Lists all VPCs with CIDR blocks
