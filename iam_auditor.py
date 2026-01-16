@@ -1,5 +1,17 @@
 import boto3
+import argparse
 from botocore.exceptions import ClientError
+
+DANGEROUS_ACTIONS = {
+    's3:*': 'Full S3 access',
+    'iam:*': 'Full IAM access',
+    'ec2:*': 'Full EC2 access',
+    '*:*': 'Administrator access',
+    's3:DeleteBucket': 'Can delete S3 buckets',
+    'iam:CreateUser': 'Can create IAM users',
+    'iam:AttachUserPolicy': 'Can escalate privileges',
+}
+
 
 def list_all_iam_roles(session):
     """
@@ -62,15 +74,11 @@ def get_policy_document(iam_client, policy_arn):
     Returns:
         dict: Policy document
     """
-    # YOUR CODE HERE
-    # This is tricky. AWS stores policy versions.
-    # Steps:
-    # 1. Get policy: iam_client.get_policy(PolicyArn=policy_arn)
-    # 2. Get default version ID from response['Policy']['DefaultVersionId']
-    # 3. Get policy version: iam_client.get_policy_version(PolicyArn=policy_arn, VersionId=version_id)
-    # 4. Return response['PolicyVersion']['Document']
+    policy_response = iam_client.get_policy(PolicyArn=policy_arn)
+    default_version_id = policy_response['Policy']['DefaultVersionId']
+    policy_version = iam_client.get_policy_version(PolicyArn=policy_arn, VersionId=default_version_id)
 
-    pass
+    return policy_version['PolicyVersion']['Document']
 
 
 def get_inline_policy_document(iam_client, role_name, policy_name):
@@ -85,22 +93,9 @@ def get_inline_policy_document(iam_client, role_name, policy_name):
     Returns:
         dict: Policy document
     """
-    # YOUR CODE HERE
-    # Simpler than managed policies
-    # Call: iam_client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
-    # Return: response['PolicyDocument']
+    response = iam_client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
+    return response['PolicyDocument']
 
-    pass
-
-DANGEROUS_ACTIONS = {
-    's3:*': 'Full S3 access',
-    'iam:*': 'Full IAM access',
-    'ec2:*': 'Full EC2 access',
-    '*:*': 'Administrator access',
-    's3:DeleteBucket': 'Can delete S3 buckets',
-    'iam:CreateUser': 'Can create IAM users',
-    'iam:AttachUserPolicy': 'Can escalate privileges',
-}
 
 def analyze_policy_document(policy_doc):
     """
@@ -114,54 +109,104 @@ def analyze_policy_document(policy_doc):
     """
     dangerous_found = []
 
-    # Policy document structure:
-    # {
-    #   "Statement": [
-    #     {
-    #       "Effect": "Allow",
-    #       "Action": ["s3:GetObject", "s3:*"],
-    #       "Resource": "*"
-    #     }
-    #   ]
-    # }
+    for statement in policy_doc['Statement']:
+        if statement['Effect'] == "Allow":
+            action = statement['Action']
+            if isinstance(action, list):
+                for action in statement['Action']:
+                    if action in DANGEROUS_ACTIONS.keys():
+                        dangerous_found.append(action)
+            else:
+                if action in DANGEROUS_ACTIONS.keys():
+                    dangerous_found.append(action)
 
-    # YOUR CODE HERE
-    # Steps:
-    # 1. Loop through policy_doc['Statement']
-    # 2. For each statement with Effect="Allow"
-    # 3. Check if any Action matches DANGEROUS_ACTIONS
-    # 4. If match found, add to dangerous_found
-    # 5. Return list
+    return dangerous_found
 
-    # Hints:
-    # - Action can be a string or a list
-    # - Need to handle both cases
-    # - Use wildcard matching (s3:* matches s3:GetObject, etc.)
+def generate_security_report(session):
+    """
+    Generate IAM security report for entire account.
 
-    pass
-
-if __name__ == '__main__':
-
-    session = boto3.Session(
-        profile_name='tooke',
-        region_name='us-east-1'
-    )
-
+    Args:
+        session: boto3.Session object
+    """
     iam_client = session.client('iam')
 
+    print("=== IAM Security Audit Report ===\n")
+
+    # Get all roles
     roles = list_all_iam_roles(session)
-    print(f"Found {len(roles)} IAM roles")
+    print(f"Total IAM roles: {len(roles)}\n")
 
-    for role in roles[:5]:
-        print(f"    - {role['RoleName']}")
+    high_risk_roles = []
 
-        policies = get_role_policies(iam_client, role['RoleName'])
+    for role in roles:
+        role_name = role['RoleName']
 
-        print(f"    Managed Policies: {len(policies['managed'])}")
-        for policy in policies['managed']:
-            print(f"    - {policy}")
+        # Get policies for this role
+        policies = get_role_policies(iam_client, role_name)
 
-        print(f"   Políticas inline: {len(policies['inline'])}")
-        for policy in policies['inline']:
-            print(f"     - {policy}")
+        # Analyze each managed policy
+        dangerous_actions = []
+        for policy_arn in policies['managed']:
+            try:
+                doc = get_policy_document(iam_client, policy_arn)
+                dangerous = analyze_policy_document(doc)
+                dangerous_actions.extend(dangerous)
+            except Exception as e:
+                print(f"  Warning: Could not analyze {policy_arn}: {e}")
+
+        # Analyze each inline policy
+        for policy_name in policies['inline']:
+            try:
+                doc = get_inline_policy_document(iam_client, role_name, policy_name)
+                dangerous = analyze_policy_document(doc)
+                dangerous_actions.extend(dangerous)
+            except Exception as e:
+                print(f"  Warning: Could not analyze inline policy {policy_name}: {e}")
+
+        # If dangerous actions found, flag the role
+        if dangerous_actions:
+            high_risk_roles.append({
+                'role_name': role_name,
+                'dangerous_actions': list(set(dangerous_actions))
+                })
+
+    # Print high-risk roles
+    if high_risk_roles:
+        print(f" HIGH RISK ROLES ({len(high_risk_roles)}):\n")
+        for role in high_risk_roles:
+            print(f"Role: {role['role_name']}")
+            for action in role['dangerous_actions']:
+                reason = DANGEROUS_ACTIONS.get(action, 'Unknown risk')
+                print(f"    - {action}: {reason}")
+            print()
+    else:
+        print(" No high-risk roles found\n")
+
+    # Summary
+    print(f"\n=== Summary ===")
+    print(f"Roles analyzed: {len(roles)}")
+    print(f"High-risk roles: {len(high_risk_roles)}")
+    if high_risk_roles:
+        risk_percentage = (len(high_risk_roles) / len(roles)) * 100
+        print(f"Risk percentage: {risk_percentage:.1f}%")
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Audit IAM policies for security issues'
+    )
+    parser.add_argument('--profile', help='AWS profile')
+    parser.add_argument('--region', default='us-east-1', help='AWS region')
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    session = boto3.Session(
+        profile_name=args.profile,
+        region_name=args.region
+    )
+    generate_security_report(session)
+
+if __name__ == '__main__':
+    main()
 
